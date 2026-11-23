@@ -565,9 +565,9 @@ impl Judge {
         // Perfect regardless of position or movement, mirroring keyboard-style play.
         let any_finger_down = self.key_down_count > 0
             || is_mouse_button_down(MouseButton::Left)
-            || touches.iter().any(|t| {
-                matches!(t.phase, TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary)
-            });
+            || touches
+                .iter()
+                .any(|t| matches!(t.phase, TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary));
 
         // pos[line][touch]
         let mut pos = Vec::<Vec<Option<Point>>>::with_capacity(chart.lines.len());
@@ -858,10 +858,7 @@ impl Judge {
         //   Miss           -> all Miss
         // The seed judgements are snapshotted so that linked results do not cascade.
         {
-            let mut seeds: Vec<(Judgement, usize, u32)> = judgements
-                .iter()
-                .map(|&(what, line, id, _)| (what, line, id))
-                .collect();
+            let mut seeds: Vec<(Judgement, usize, u32)> = judgements.iter().map(|&(what, line, id, _)| (what, line, id)).collect();
             // Player-driven judgements take priority over automatic timeouts, so a
             // successful hit is never downgraded to Miss by a chord partner.
             seeds.sort_by_key(|&(what, _, _)| std::cmp::Reverse(judgement_rank(what)));
@@ -1163,7 +1160,10 @@ mod tests {
         NoteKind::Click
     }
     fn hold() -> NoteKind {
-        NoteKind::Hold { end_time: 1., end_height: 1. }
+        NoteKind::Hold {
+            end_time: 1.,
+            end_height: 1.,
+        }
     }
     fn flick() -> NoteKind {
         NoteKind::Flick

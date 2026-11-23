@@ -43,8 +43,13 @@ export CC_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi${API}-cla
 export CXX_armv7_linux_androideabi="$TOOLCHAIN/armv7a-linux-androideabi${API}-clang++"
 export AR_armv7_linux_androideabi="$TOOLCHAIN/llvm-ar"
 
+# Tell rustc to link via the NDK clang wrapper, which knows the Android sysroot
+# (so -llog and other platform libs resolve). Forcing -fuse-ld=lld here breaks
+# that and causes "unable to find library -llog".
+export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$TOOLCHAIN/armv7a-linux-androideabi${API}-clang"
+
 # ARMv7-A + NEON. Remove +neon if targeting NEON-less CPUs.
-export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+neon -C link-arg=-fuse-ld=lld"
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+neon"
 
 echo "==> Building $TARGET (lite / optimized for low-end devices)"
 cargo build --release --locked \
