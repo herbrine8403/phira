@@ -43,15 +43,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK & NDK
         env:
           SKIP_JDK_VERSION_CHECK: 'true'
-
-      - name: Install Android NDK (r25c, supports armv7 + API 21)
         run: |
-          sdkmanager "ndk;25.2.9519653"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "SDK_ROOT=$SDK_ROOT"
+          SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -path '*/bin/sdkmanager' -type f 2>/dev/null | sort | tail -1)
+          if [[ -z "$SDKMANAGER" ]]; then SDKMANAGER=$(command -v sdkmanager); fi
+          echo "SDKMANAGER=$SDKMANAGER"
+          # Accept all SDK licenses non-interactively, then install NDK r25c.
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;25.2.9519653"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         run: |
