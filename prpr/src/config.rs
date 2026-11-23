@@ -140,6 +140,18 @@ impl Config {
             // Due to the fucking poor performance of the Maloon GPU, the sample count must be set to 1.
             self.sample_count = 1;
         }
+        // Low-end 32-bit ARM (Android) devices: apply a conservative visual preset.
+        // These are the cheapest wins: they disable offscreen MSAA blitting, full-screen
+        // shader effects and particle emitters while leaving gameplay, chart loading,
+        // login and custom resource packs fully intact. Users can still re-enable them
+        // manually in settings afterwards.
+        #[cfg(all(target_os = "android", target_pointer_width = "32"))]
+        {
+            self.sample_count = 1;
+            self.fxaa = false;
+            self.disable_effect = true;
+            self.particle = false;
+        }
     }
 
     #[inline]

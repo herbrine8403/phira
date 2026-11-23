@@ -13,7 +13,12 @@ use miniquad::{EventHandler, MouseButton};
 use once_cell::sync::Lazy;
 use sasa::{PlaySfxParams, Sfx};
 use serde::Serialize;
-use std::{cell::RefCell, collections::HashMap, mem, num::FpCategory};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    mem,
+    num::FpCategory,
+};
 use tracing::debug;
 
 pub const FLICK_SPEED_THRESHOLD: f32 = 0.8;
@@ -24,6 +29,40 @@ pub const UP_TOLERANCE: f64 = 0.05;
 pub const DIST_FACTOR: f64 = 0.2;
 
 const EARLY_OFFSET: f64 = 0.07;
+
+/// Notes whose timestamps are within this window (in seconds) are treated as one
+/// simultaneous group (a "chord") for the multi-note linkage rule.
+const CHORD_EPS: f64 = 0.02;
+
+/// Priority used when choosing the primary judgement of a chord. A player-driven
+/// judgement (Perfect / Good / Bad) always wins over an automatic Miss so that a
+/// successful tap is never overwritten by one of its chord partners timing out.
+#[inline]
+fn judgement_rank(w: Judgement) -> u8 {
+    match w {
+        Judgement::Perfect => 3,
+        Judgement::Good | Judgement::Bad => 2,
+        Judgement::Miss => 1,
+    }
+}
+
+/// Given the judgement of the note the player actually touched in a chord, compute the
+/// judgement that a sibling note should receive under the "chord linkage" rule.
+///
+/// - The touched note judged Perfect  -> every sibling is Perfect
+/// - The touched note judged Good/Bad -> Tap/Hold siblings become Good, Drag/Flick Perfect
+/// - The touched note judged Miss     -> every sibling is Miss
+#[inline]
+fn linked_judgement(what: Judgement, kind: &NoteKind) -> Judgement {
+    match what {
+        Judgement::Perfect => Judgement::Perfect,
+        Judgement::Miss => Judgement::Miss,
+        Judgement::Good | Judgement::Bad => match kind {
+            NoteKind::Drag | NoteKind::Flick => Judgement::Perfect,
+            _ => Judgement::Good,
+        },
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum HitSound {
@@ -520,6 +559,16 @@ impl Judge {
                 it
             })
             .collect();
+
+        // "Finger is down" state — the touch-screen equivalent of `key_down_count`.
+        // While any finger / mouse button / key is held, Drag and Flick notes are judged
+        // Perfect regardless of position or movement, mirroring keyboard-style play.
+        let any_finger_down = self.key_down_count > 0
+            || is_mouse_button_down(MouseButton::Left)
+            || touches.iter().any(|t| {
+                matches!(t.phase, TouchPhase::Started | TouchPhase::Moved | TouchPhase::Stationary)
+            });
+
         // pos[line][touch]
         let mut pos = Vec::<Vec<Option<Point>>>::with_capacity(chart.lines.len());
         for id in 0..chart.lines.len() {
@@ -739,22 +788,28 @@ impl Judge {
                 if -dt > LIMIT_BAD {
                     break;
                 }
-                if !matches!(note.kind, NoteKind::Drag) && (self.key_down_count == 0 || !matches!(note.kind, NoteKind::Flick)) {
+                // Only Drag / Flick reach this point (Click / Hold are handled in the
+                // touch passes above). New rule: while any finger / key is held down,
+                // they are judged Perfect regardless of position or movement — the
+                // touch-screen equivalent of keyboard play.
+                if !matches!(note.kind, NoteKind::Drag | NoteKind::Flick) {
                     continue;
                 }
-                let dt = dt.abs();
-                let x = &mut note.object.translation.0;
-                x.set_time(t);
-                let x = x.now();
-                if self.key_down_count != 0
-                    || pos.iter().any(|it| {
+                if any_finger_down {
+                    note.judge = JudgeStatus::PreJudge;
+                } else {
+                    let dt = dt.abs();
+                    let x = &mut note.object.translation.0;
+                    x.set_time(t);
+                    let x = x.now();
+                    if pos.iter().any(|it| {
                         it.is_some_and(|it| {
                             let dx = (it.x - x).abs() as f64 / note.judge_area as f64;
                             dx <= X_DIFF_MAX && dt <= (LIMIT_BAD - LIMIT_PERFECT * (dx - 0.9).max(0.))
                         })
-                    })
-                {
-                    note.judge = JudgeStatus::PreJudge;
+                    }) {
+                        note.judge = JudgeStatus::PreJudge;
+                    }
                 }
             }
         }
@@ -794,6 +849,60 @@ impl Judge {
                 }
             }
         }
+
+        // ---- Multi-note (chord) linkage ----
+        // A single real hit on one note of a simultaneous group decides the judgement
+        // of every still-unjudged sibling:
+        //   Perfect        -> all Perfect
+        //   Good / Bad     -> Tap/Hold -> Good, Drag/Flick -> Perfect
+        //   Miss           -> all Miss
+        // The seed judgements are snapshotted so that linked results do not cascade.
+        {
+            let mut seeds: Vec<(Judgement, usize, u32)> = judgements
+                .iter()
+                .map(|&(what, line, id, _)| (what, line, id))
+                .collect();
+            // Player-driven judgements take priority over automatic timeouts, so a
+            // successful hit is never downgraded to Miss by a chord partner.
+            seeds.sort_by_key(|&(what, _, _)| std::cmp::Reverse(judgement_rank(what)));
+            let mut linked: HashSet<(usize, u32)> = HashSet::new();
+            for (what, src_line, src_id) in seeds {
+                let src_time = chart.lines[src_line].notes[src_id as usize].time;
+                // Snapshot targets first so chart can be mutated afterwards.
+                let mut targets: Vec<(usize, u32)> = Vec::new();
+                for (line_id, (line, (idx, st))) in chart.lines.iter().zip(self.notes.iter()).enumerate() {
+                    for id in &idx[*st..] {
+                        if line_id == src_line && *id == src_id {
+                            continue;
+                        }
+                        let note = &line.notes[*id as usize];
+                        if note.fake || !matches!(note.judge, JudgeStatus::NotJudged | JudgeStatus::PreJudge) {
+                            continue;
+                        }
+                        if (note.time - src_time).abs() <= CHORD_EPS {
+                            targets.push((line_id, *id));
+                        }
+                    }
+                }
+                for (line_id, id) in targets {
+                    if !linked.insert((line_id, id)) {
+                        continue;
+                    }
+                    let note = &mut chart.lines[line_id].notes[id as usize];
+                    let target = linked_judgement(what, &note.kind);
+                    note.judge = JudgeStatus::Judged;
+                    // Drag/Flick always get diff 0 on commit; other kinds use their own
+                    // timestamp so linked hits register as on-beat (diff = 0).
+                    let diff = if matches!(note.kind, NoteKind::Drag | NoteKind::Flick) {
+                        None
+                    } else {
+                        Some(note.time)
+                    };
+                    judgements.push((target, line_id, id, diff));
+                }
+            }
+        }
+
         for (judgement, line_id, id, diff) in judgements {
             let line = &mut chart.lines[line_id];
             let note = &mut line.notes[id as usize];
@@ -1043,5 +1152,54 @@ pub fn icon_index(score: u32, full_combo: bool) -> usize {
         (1000000, _) => 7,
         (_, false) => 5,
         (_, true) => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tap() -> NoteKind {
+        NoteKind::Click
+    }
+    fn hold() -> NoteKind {
+        NoteKind::Hold { end_time: 1., end_height: 1. }
+    }
+    fn flick() -> NoteKind {
+        NoteKind::Flick
+    }
+    fn drag() -> NoteKind {
+        NoteKind::Drag
+    }
+
+    #[test]
+    fn perfect_hit_makes_every_sibling_perfect() {
+        for kind in [tap(), hold(), flick(), drag()] {
+            assert!(matches!(linked_judgement(Judgement::Perfect, &kind), Judgement::Perfect));
+        }
+    }
+
+    #[test]
+    fn good_bad_hit_makes_tap_hold_good_and_flick_drag_perfect() {
+        for what in [Judgement::Good, Judgement::Bad] {
+            assert!(matches!(linked_judgement(what, &tap()), Judgement::Good));
+            assert!(matches!(linked_judgement(what, &hold()), Judgement::Good));
+            assert!(matches!(linked_judgement(what, &flick()), Judgement::Perfect));
+            assert!(matches!(linked_judgement(what, &drag()), Judgement::Perfect));
+        }
+    }
+
+    #[test]
+    fn miss_hit_makes_every_sibling_miss() {
+        for kind in [tap(), hold(), flick(), drag()] {
+            assert!(matches!(linked_judgement(Judgement::Miss, &kind), Judgement::Miss));
+        }
+    }
+
+    #[test]
+    fn player_judgements_outrank_timeouts() {
+        assert!(judgement_rank(Judgement::Perfect) > judgement_rank(Judgement::Good));
+        assert!(judgement_rank(Judgement::Good) > judgement_rank(Judgement::Miss));
+        assert_eq!(judgement_rank(Judgement::Good), judgement_rank(Judgement::Bad));
     }
 }
