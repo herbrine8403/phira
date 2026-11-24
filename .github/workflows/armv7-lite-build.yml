@@ -94,22 +94,31 @@ jobs:
         run: |
           set -euo pipefail
           WORKDIR=$(mktemp -d)
+          # IMPORTANT: update the stock APK in place instead of unzip+rezip.
+          # Re-zipping compresses resources.arsc, which Android requires to be
+          # STORED + 4-byte aligned; compressing it breaks resources/built-in charts.
+          cp "$GITHUB_WORKSPACE/stock.apk" "$WORKDIR/unsigned.apk"
           cd "$WORKDIR"
-          unzip -q "$GITHUB_WORKSPACE/stock.apk"
+          mkdir -p lib/armeabi-v7a
           cp "$GITHUB_WORKSPACE/target/armv7-linux-androideabi/release/libphira.so" lib/armeabi-v7a/libphira.so
+          # -0 keeps the .so STORED (matches stock, avoids extraction issues).
+          zip -q -0 unsigned.apk lib/armeabi-v7a/libphira.so
           # Strip stock signature; APK must be re-signed after modification.
-          rm -f META-INF/MANIFEST.MF META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/*.EC
-          # Repackage: store .so uncompressed, deflate everything else.
-          zip -q -r "$WORKDIR/unsigned.apk" . -x 'lib/armeabi-v7a/libphira.so'
-          zip -q -0 "$WORKDIR/unsigned.apk" lib/armeabi-v7a/libphira.so
+          zip -q -d unsigned.apk 'META-INF/MANIFEST.MF' 'META-INF/*.SF' \
+            'META-INF/*.RSA' 'META-INF/*.DSA' 'META-INF/*.EC' || true
+          # Sanity check: resources.arsc must still be STORED.
+          unzip -v unsigned.apk | grep -i 'resources.arsc'
+          if unzip -v unsigned.apk | grep -i 'resources.arsc' | grep -q 'Defl'; then
+            echo "ERROR: resources.arsc got compressed!" >&2; exit 1
+          fi
           BT="$ANDROID_SDK_ROOT/build-tools/33.0.2"
-          "$BT/zipalign" -f -p 4 "$WORKDIR/unsigned.apk" "$WORKDIR/aligned.apk"
+          "$BT/zipalign" -f -p 4 unsigned.apk aligned.apk
           keytool -genkeypair -v -keystore phira.jks -alias phira \
             -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass android -keypass android \
             -dname "CN=Phira ARMv7 Lite, OU=Community, O=Phira, L=NA, ST=NA, C=CN" > /dev/null 2>&1
           "$BT/apksigner" sign --ks phira.jks --ks-pass pass:android --key-pass pass:android \
-            --min-sdk-version 21 --out "$GITHUB_WORKSPACE/phira-armv7-lite.apk" "$WORKDIR/aligned.apk"
+            --min-sdk-version 21 --out "$GITHUB_WORKSPACE/phira-armv7-lite.apk" aligned.apk
           echo "APK built:"
           ls -lh "$GITHUB_WORKSPACE/phira-armv7-lite.apk"
           "$BT/apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/phira-armv7-lite.apk" | head -20
