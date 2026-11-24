@@ -52,10 +52,11 @@ jobs:
           SDKMANAGER=$(find "$SDK_ROOT/cmdline-tools" -path '*/bin/sdkmanager' -type f 2>/dev/null | sort | tail -1)
           if [[ -z "$SDKMANAGER" ]]; then SDKMANAGER=$(command -v sdkmanager); fi
           echo "SDKMANAGER=$SDKMANAGER"
-          # Accept all SDK licenses non-interactively, then install NDK r25c.
+          # Accept all SDK licenses non-interactively, then install NDK r25c + build-tools.
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          "$SDKMANAGER" "ndk;25.2.9519653"
+          "$SDKMANAGER" "ndk;25.2.9519653" "build-tools;33.0.2"
           echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         run: |
@@ -80,6 +81,44 @@ jobs:
         with:
           name: phira-libphira-armv7-lite
           path: target/armv7-linux-androideabi/release/libphira.so
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Download stock v0.8.3 armeabi-v7a APK
+        run: |
+          curl -fL --retry 3 -o stock.apk \
+            https://github.com/TeamFlos/phira/releases/download/v0.8.3/Phira-android-armeabi-v7a-v0.8.3.apk
+          ls -lh stock.apk
+
+      - name: Repackage APK with optimized libphira.so
+        run: |
+          set -euo pipefail
+          WORKDIR=$(mktemp -d)
+          cd "$WORKDIR"
+          unzip -q "$GITHUB_WORKSPACE/stock.apk"
+          cp "$GITHUB_WORKSPACE/target/armv7-linux-androideabi/release/libphira.so" lib/armeabi-v7a/libphira.so
+          # Strip stock signature; APK must be re-signed after modification.
+          rm -f META-INF/MANIFEST.MF META-INF/*.SF META-INF/*.RSA META-INF/*.DSA META-INF/*.EC
+          # Repackage: store .so uncompressed, deflate everything else.
+          zip -q -r "$WORKDIR/unsigned.apk" . -x 'lib/armeabi-v7a/libphira.so'
+          zip -q -0 "$WORKDIR/unsigned.apk" lib/armeabi-v7a/libphira.so
+          BT="$ANDROID_SDK_ROOT/build-tools/33.0.2"
+          "$BT/zipalign" -f -p 4 "$WORKDIR/unsigned.apk" "$WORKDIR/aligned.apk"
+          keytool -genkeypair -v -keystore phira.jks -alias phira \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Phira ARMv7 Lite, OU=Community, O=Phira, L=NA, ST=NA, C=CN" > /dev/null 2>&1
+          "$BT/apksigner" sign --ks phira.jks --ks-pass pass:android --key-pass pass:android \
+            --min-sdk-version 21 --out "$GITHUB_WORKSPACE/phira-armv7-lite.apk" "$WORKDIR/aligned.apk"
+          echo "APK built:"
+          ls -lh "$GITHUB_WORKSPACE/phira-armv7-lite.apk"
+          "$BT/apksigner" verify --verbose --print-certs "$GITHUB_WORKSPACE/phira-armv7-lite.apk" | head -20
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: phira-armv7-lite-apk
+          path: phira-armv7-lite.apk
           if-no-files-found: error
           retention-days: 14
 

@@ -393,6 +393,24 @@ fn on_pause_resume(pause: bool) {
     }
 }
 
+// The stock v0.8.3 APK's Java layer (org.flos.phira.QuadSurface) still calls
+// quad_native.QuadNative.preprocessInput, but the miniquad fork this build uses
+// no longer exports it. Provide an empty no-op implementation so the stock APK
+// can load our freshly built libphira.so without UnsatisfiedLinkError.
+// Signature: (JNIEnv*, jclass, AInputEvent*, float, float, boolean, boolean) -> void
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_quad_1native_QuadNative_preprocessInput(
+    _env: *mut std::ffi::c_void,
+    _class: *mut std::ffi::c_void,
+    _motion_event: *mut std::ffi::c_void,
+    _x: f32,
+    _y: f32,
+    _down: u8,
+    _move: u8,
+) {
+}
+
 #[cfg(target_os = "android")]
 #[no_mangle]
 pub extern "C" fn Java_quad_1native_QuadNative_initializeEnvironment(env: EnvUnowned, _class: JClass) {
